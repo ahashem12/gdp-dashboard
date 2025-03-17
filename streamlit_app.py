@@ -1,151 +1,173 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+import os
+from dotenv import load_dotenv
+from slangit_api import SlangitAPI, MultiSpaceProcessor
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Load environment variables
+load_dotenv()
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# UI Setup
+st.set_page_config(layout="wide")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Custom CSS for containers
+st.markdown("""
+    <style>
+        /* Fix main container padding */
+        .block-container {
+            padding: 1rem;
+        }
+        
+        /* Style for chat container */
+        div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 1rem;
+            background-color: white;
+        }
+        
+        /* Make chat messages more compact */
+        .stChatMessage {
+            padding: 5px !important;
+            margin: 5px !important;
+        }
+        
+        /* Custom scrollbar */
+        div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]::-webkit-scrollbar {
+            width: 5px;
+        }
+        
+        div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        
+        div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 5px;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+st.title("💬 Slangit Multi-Space Chat")
+st.caption("🚀 Chat with multiple Slangit spaces simultaneously")
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Initialize session state
+if "space_chats" not in st.session_state:
+    st.session_state.space_chats = {}
+if "conversation_ids" not in st.session_state:
+    st.session_state.conversation_ids = {}
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# Define space to project name mapping
+SPACE_MAPPING = {
+    41: "Al Bawader",
+    45: "3F Pharma",
+    46: "Al Mada"
+}
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+# Available spaces with their names
+if "available_spaces" not in st.session_state:
+    st.session_state.available_spaces = list(SPACE_MAPPING.keys())
+
+# Initialize Slangit API Utility
+def get_slangit_api(space_id):
+    return SlangitAPI(
+        base_url='https://mvp.slangit.ai/api',
+        token=os.getenv("SLANGIT_TOKEN"),
+        space_id=space_id
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+# Create three columns for the chat windows
+col1, col2, col3 = st.columns(3)
 
-    return gdp_df
+# Function to create or get conversation for a space
+def get_conversation(space_id):
+    if space_id not in st.session_state.space_chats:
+        project_name = SPACE_MAPPING.get(space_id, f"Space {space_id}")
+        st.session_state.space_chats[space_id] = [{"role": "assistant", "content": f"Welcome to {project_name}! How can I help you?"}]
+        slangit_api = get_slangit_api(space_id)
+        st.session_state.conversation_ids[space_id] = slangit_api.create_conversation()
+    return st.session_state.conversation_ids[space_id]
 
-gdp_df = get_gdp_data()
+# Function to format space options for dropdown
+def format_space_option(space_id):
+    return SPACE_MAPPING.get(space_id, f"Space {space_id}")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# Function to handle chat for a specific space
+def space_chat(col, window_num):
+    with col:
+        # Project selection at the top
+        space_id = st.selectbox(
+            f"Select Project",
+            options=st.session_state.available_spaces,
+            format_func=format_space_option,
+            key=f"space_{window_num}"
+        )
+        
+        # Get or create conversation for this space
+        conversation_id = get_conversation(space_id)
+        
+        # Create a container for the chat interface
+        chat_container = st.container()
+        
+        # Display chat messages in the container
+        with chat_container:
+            for msg in st.session_state.space_chats[space_id]:
+                st.chat_message(msg["role"]).write(msg["content"])
+        
+        # Chat input at the bottom
+        prompt = st.chat_input(f"Chat with {format_space_option(space_id)}", key=f"input_{window_num}")
+        
+        if prompt:
+            # Append user's message
+            st.session_state.space_chats[space_id].append({"role": "user", "content": prompt})
+            
+            with st.spinner("Generating response..."):
+                # Get response from Slangit API
+                slangit_api = get_slangit_api(space_id)
+                response = slangit_api.send_message(conversation_id, prompt)
+                
+                # Append assistant's response
+                st.session_state.space_chats[space_id].append({"role": "assistant", "content": response})
+            
+            # Force a rerun to update the chat
+            st.rerun()
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# Create the three chat windows
+space_chat(col1, 1)
+space_chat(col2, 2)
+space_chat(col3, 3)
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+# Add the multi-space chat at the bottom
+st.markdown("---")
+st.subheader("💬 Chat with All Selected Spaces")
 
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
+# Get the selected spaces from all windows
+selected_spaces = [
+    st.session_state.get(f"space_{i}") 
+    for i in range(1, 4)
 ]
 
-st.header('GDP over time', divider='gray')
+# Show selected projects
+st.caption("Selected Projects: " + ", ".join([format_space_option(space_id) for space_id in selected_spaces]))
 
-''
+# Multi-space chat input
+if multi_prompt := st.chat_input("Ask all selected spaces", key="multi_space_input"):
+    # Process the question for each selected space
+    for space_id in selected_spaces:
+        conversation_id = get_conversation(space_id)
+        
+        # Append user's message to each space's chat
+        st.session_state.space_chats[space_id].append({"role": "user", "content": multi_prompt})
+        
+        with st.spinner(f"Getting response from {format_space_option(space_id)}..."):
+            # Get response from Slangit API
+            slangit_api = get_slangit_api(space_id)
+            response = slangit_api.send_message(conversation_id, multi_prompt)
+            
+            # Append assistant's response
+            st.session_state.space_chats[space_id].append({"role": "assistant", "content": response})
+    
+    # Force a rerun to update all chats
+    st.rerun()
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
